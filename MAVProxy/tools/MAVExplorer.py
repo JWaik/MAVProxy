@@ -1417,6 +1417,35 @@ def loadfile(args):
 
     setup_menus()
 
+def cmd_distance(args):
+    """Show total distance traveled based on GPS data."""
+    def haversine(lat1, lon1, lat2, lon2):
+        """Return distance in meters between two lat/lon points."""
+        R = 6371000.0  # Earth radius (m)
+        dlat = radians(lat2 - lat1)
+        dlon = radians(lon2 - lon1)
+        a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
+        return 2 * R * asin(sqrt(a))
+
+    total_dist = 0.0
+    last_lat, last_lon = None, None
+
+    # Iterate over GPS messages.
+    while True:
+        msg = mestate.mlog.recv_match(type=['GPS'], blocking=False)
+        if msg is None:   # End of log
+            break
+        if msg.Status < 3:  # Require 3D GPS fix
+            continue
+        # GPS position in 1e-7 degrees (DataFlash log units)
+        lat, lon = msg.Lat, msg.Lng
+        if last_lat is not None:
+            total_dist += haversine(last_lat, last_lon, lat, lon)
+        last_lat, last_lon = lat, lon
+    mestate.mlog.rewind()
+
+    print(f"Total distance traveled: {total_dist/1000:.2f} km ({total_dist:.2f} m)")
+
 def print_caught_exception(e):
     if sys.version_info[0] >= 3:
         ret = "%s\n" % e
@@ -1578,6 +1607,7 @@ command_map = {
     'file'       : (cmd_file,      'show files'),
     'mission'    : (cmd_mission,   'show mission'),
     'logmessage' : (cmd_logmessage, 'show log message information'),
+    'distance'   : (cmd_distance,  'show total distance traveled based on GPS data'),
     }
 
 def progress_bar(pct):
