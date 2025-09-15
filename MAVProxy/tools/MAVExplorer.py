@@ -1418,33 +1418,63 @@ def loadfile(args):
     setup_menus()
 
 def cmd_distance(args):
-    """Show total distance traveled based on GPS data."""
+    """
+    Show total distance traveled based on GPS data.
+    segments: list of (mode, start_time, end_time)
+    returns: list of (mode, distance_m)
+    """
+    _rad = radians
+    _sin = sin
+    _cos = cos
+    _asin = asin
+    _sqrt = sqrt
+    R = 6371000.0  # Earth radius (m)
+
     def haversine(lat1, lon1, lat2, lon2):
-        """Return distance in meters between two lat/lon points."""
-        R = 6371000.0  # Earth radius (m)
-        dlat = radians(lat2 - lat1)
-        dlon = radians(lon2 - lon1)
-        a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
-        return 2 * R * asin(sqrt(a))
+        """Distance in meters between two lat/lon points."""
+        dlat = _rad(lat2 - lat1)
+        dlon = _rad(lon2 - lon1)
+        a = _sin(dlat / 2) ** 2 + _cos(_rad(lat1)) * _cos(_rad(lat2)) * _sin(dlon / 2) ** 2
+        return 2 * R * _asin(_sqrt(a))
 
-    total_dist = 0.0
-    last_lat, last_lon = None, None
+    segments = flightmodes  # list of (mode, start, end)
 
-    # Iterate over GPS messages.
+    # read all GPS fixes once
+    gps_points = []
+    recv = mestate.mlog.recv_match
     while True:
-        msg = mestate.mlog.recv_match(type=['GPS'], blocking=False)
-        if msg is None:   # End of log
+        msg = recv(type=['GPS'], blocking=False)
+        if msg is None:
             break
-        if msg.Status < 3:  # Require 3D GPS fix
+        if msg.Status < 3: # only valid 3D fixes
             continue
-        # GPS position in 1e-7 degrees (DataFlash log units)
-        lat, lon = msg.Lat, msg.Lng
-        if last_lat is not None:
-            total_dist += haversine(last_lat, last_lon, lat, lon)
-        last_lat, last_lon = lat, lon
+        ts = msg._timestamp
+        if ts is None:
+            continue
+        gps_points.append((ts, msg.Lat, msg.Lng))
     mestate.mlog.rewind()
 
-    print(f"Total distance traveled: {total_dist/1000:.2f} km ({total_dist:.2f} m)")
+    # distance per segment
+    results = []
+    total = 0.0
+    for mode, start, end in segments:
+        dist = 0.0
+        last_lat = last_lon = None
+        for ts, lat, lon in gps_points:
+            if ts < start or ts > end:
+                continue
+            if last_lat is not None:
+                step = haversine(last_lat, last_lon, lat, lon)
+                dist += step
+                total += step
+            last_lat, last_lon = lat, lon
+        results.append((mode, dist))
+
+    for mode, d in results:
+        print(f"{mode:8s}: {d/1000:.2f} km ({d:.1f} m)")
+    print(f"Total distance: {total/1000:.2f} km ({total:.1f} m)")
+
+    return results
 
 def print_caught_exception(e):
     if sys.version_info[0] >= 3:
