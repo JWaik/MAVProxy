@@ -1437,6 +1437,7 @@ def cmd_distance(args):
         a = _sin(dlat / 2) ** 2 + _cos(_rad(lat1)) * _cos(_rad(lat2)) * _sin(dlon / 2) ** 2
         return 2 * R * _asin(_sqrt(a))
 
+    check_vehicle_type()
     segments = flightmodes  # list of (mode, start, end)
 
     # read all GPS fixes once
