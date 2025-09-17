@@ -1417,7 +1417,7 @@ def loadfile(args):
 
     setup_menus()
 
-def cmd_distance(args):
+def cmd_gpsdist(args):
     """
     Show total distance traveled based on GPS data.
     segments: list of (mode, start_time, end_time)
@@ -1638,7 +1638,7 @@ command_map = {
     'file'       : (cmd_file,      'show files'),
     'mission'    : (cmd_mission,   'show mission'),
     'logmessage' : (cmd_logmessage, 'show log message information'),
-    'distance'   : (cmd_distance,  'show total distance traveled based on GPS data'),
+    'gpsdist'    : (cmd_gpsdist,  'show total distance traveled based on GPS data'),
     }
 
 def progress_bar(pct):
