@@ -3,28 +3,27 @@
 from MAVProxy.modules.lib import mp_module
 from MAVProxy.modules.lib import mp_settings
 from pymavlink import mavutil
-import serial
-import threading
+import serial, struct, threading, time
 
 STX = b'\x55\x66'
 CTRL_NEED_ACK = b'\x00'
 CTRL_ACK_PACK = b'\x01'
 START_SEQ = b'\x00\x00'
 
-CMD_ID_REQUEST_SYSTEM_SETTING = 0x16
-CMD_ID_REQUEST_HW_ID = 0x40
-CMD_ID_REQUEST_CHANNEL_DATA = 0x42
-CMD_ID_REQUEST_DATALINK_STATUS = 0x43
-CMD_ID_REQUEST_IMG_STATUS = 0x44
-CMD_ID_REQUEST_FW_VERSION = 0x47
-CMD_ID_REQUEST_ALL_CHANNEL_MAP = 0x48
-CMD_ID_REQUEST_CHANNEL_MAP = 0x49
-CMD_ID_REQUEST_ALL_CHANNEL_REVERSE = 0x4B
-CMD_ID_REQUEST_CHANNEL_REVERSE = 0x4C
+CMD_ID_REQUEST_SYSTEM_SETTING = b'\x16'
+CMD_ID_REQUEST_HW_ID = b'\x40'
+CMD_ID_REQUEST_CHANNEL_DATA = b'\x42'
+CMD_ID_REQUEST_DATALINK_STATUS = b'\x43'
+CMD_ID_REQUEST_IMG_STATUS = b'\x44'
+CMD_ID_REQUEST_FW_VERSION = b'\x47'
+CMD_ID_REQUEST_ALL_CHANNEL_MAP = b'\x48'
+CMD_ID_REQUEST_CHANNEL_MAP = b'\x49'
+CMD_ID_REQUEST_ALL_CHANNEL_REVERSE = b'\x4B'
+CMD_ID_REQUEST_CHANNEL_REVERSE = b'\x4C'
 
-CMD_ID_SEND_CHANNEL_MAP_TO_GROUND = 0x4A
-CMD_ID_SEND_SYSTEM_SETTING_TO_GROUND = 0x17
-CMD_ID_SEND_CHANNEL_REVERSE_TO_GROUND = 0x4D
+CMD_ID_SEND_CHANNEL_MAP_TO_GROUND = b'\x4A'
+CMD_ID_SEND_SYSTEM_SETTING_TO_GROUND = b'\x17'
+CMD_ID_SEND_CHANNEL_REVERSE_TO_GROUND = b'\x4D'
 
 class SiyiRCModule(mp_module.MPModule):
     def __init__(self, mpstate):
@@ -49,6 +48,7 @@ class SiyiRCModule(mp_module.MPModule):
     def reader(self):
         """Background thread: read & parse SIYI packets"""
         if not self.ser:
+            # todo:
             return
         while self._running:
             try:
