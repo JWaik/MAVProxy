@@ -25,10 +25,23 @@ CMD_ID_SEND_CHANNEL_MAP_TO_GROUND = b'\x4A'
 CMD_ID_SEND_SYSTEM_SETTING_TO_GROUND = b'\x17'
 CMD_ID_SEND_CHANNEL_REVERSE_TO_GROUND = b'\x4D'
 
+# frequency in Hz -> map option number
+OUTPUT_FREQUENCY = {
+    "0"   : 0,     # OFF
+    "2"   : 1,
+    "4"   : 2,
+    "5"   : 3,
+    "10"  : 4,
+    "20"  : 5,
+    "50"  : 6,
+    "100" : 7,
+}
+
 class SiyiRCModule(mp_module.MPModule):
     def __init__(self, mpstate):
         super(SiyiRCModule, self).__init__(mpstate, "siyi_rc", "SIYI RC from SDK over serial")
-        self.add_command('siyi_serial', self.cmd_serial, 'SIYI remote serial control')
+        self.add_command('siyiserial', self.cmd_serial, 'SIYI remote serial control')
+        self.add_command('siyirc', self.cmd_rc_stream, 'SIYI remote rc streaming')
 
         self.serial_settings = mp_settings.MPSettings(
             [ ('port', str, '/dev/ttyACM0'),
@@ -43,6 +56,31 @@ class SiyiRCModule(mp_module.MPModule):
         self._running = True
         self._rx_thread = threading.Thread(target=self.reader, daemon=True)
         self._rx_thread.start()
+
+    # --------------------- I/O helpers --------------------------------
+    def send_request(self, pkt_type, payload=b''):
+        """Send a framed request"""
+        frame = bytearray(STX)
+        frame.extend(CTRL_NEED_ACK)
+        frame.append(len(payload))
+        frame.extend(START_SEQ)
+        frame.extend(pkt_type)
+        frame.extend(payload)
+        # TODO: Crc calculation
+        # frame.extend(sum(frame) & b'\xFF) # crc
+        # self.ser.write(frame)
+        # Or, for a more formatted output with spaces:
+        hex_string = " ".join([f"{byte:02x}" for byte in frame])
+        print(hex_string)
+
+    def request_rc_stream(self, rate='4'):
+        options = OUTPUT_FREQUENCY.get(rate)
+        print(f"option {options}")
+        if options is not None:
+            self.send_request(CMD_ID_REQUEST_CHANNEL_DATA, struct.pack('<B', options))
+            print(f"Request RC stream: {rate} Hz")
+            return True
+        return False
 
     # ------------------------------------------------------------------
     def reader(self):
@@ -113,6 +151,27 @@ class SiyiRCModule(mp_module.MPModule):
             self.serial_close()
         elif args[0] == "connect":
             self.serial_connect()
+        else:
+            print(usage)
+
+    def cmd_rc_stream(self, args):
+        '''rc streaming commands'''
+        usage = "Usage: siyirc <start|stop>"
+        if len(args) < 1:
+            print(usage)
+            return
+        elif not self.ser:
+            print("Serial port is not opened")
+            return
+
+        if args[0] == "start":
+            if len(args) > 1:
+                if not self.request_rc_stream(rate=args[1]):
+                    print("Usage: siyi_rc start <FREQUENCY> \n Available FREQUENCY: ", end=' ')
+                    print(*list(OUTPUT_FREQUENCY.keys()), sep=", ", end=" Hz.\n")
+                    return
+        elif args[0] == "stop":
+            self.request_rc_stream(rate_options=0)
         else:
             print(usage)
 
