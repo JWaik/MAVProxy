@@ -104,21 +104,16 @@ class SiyiRCModule(mp_module.MPModule):
     def send_request(self, pkt_type, payload=b''):
         """Send a framed request"""
         frame = bytearray(STX)
-        frame.extend(CTRL_NEED_ACK)
-        frame.append(len(payload))
+        frame.extend(CTRL_ACK_PACK)
+        frame.extend(len(payload).to_bytes(2, 'little'))
         frame.extend(START_SEQ)
         frame.extend(pkt_type)
         frame.extend(payload)
-        # TODO: Crc calculation
-        # frame.extend(sum(frame) & b'\xFF) # crc
-        # self.ser.write(frame)
-        # Or, for a more formatted output with spaces:
-        hex_string = " ".join([f"{byte:02x}" for byte in frame])
-        print(hex_string)
+        frame.extend(crc16_ccitt(frame).to_bytes(2, 'little'))
+        self.ser.write(frame)
 
     def request_rc_stream(self, rate='4'):
         options = OUTPUT_FREQUENCY.get(rate)
-        print(f"option {options}")
         if options is not None:
             self.send_request(CMD_ID_REQUEST_CHANNEL_DATA, struct.pack('<B', options))
             print(f"Request RC stream: {rate} Hz")
