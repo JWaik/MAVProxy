@@ -5,24 +5,44 @@ from MAVProxy.modules.lib import mp_settings
 from pymavlink import mavutil
 import serial, struct, threading, time
 
-STX = b'\x55\x66'
+# Mark byte for parsing
+STX           = b'\x55\x66'
 CTRL_NEED_ACK = b'\x00'
 CTRL_ACK_PACK = b'\x01'
-START_SEQ = b'\x00\x00'
+START_SEQ     = b'\x00\x00'
 
-CMD_ID_REQUEST_SYSTEM_SETTING = b'\x16'
-CMD_ID_REQUEST_HW_ID = b'\x40'
-CMD_ID_REQUEST_CHANNEL_DATA = b'\x42'
-CMD_ID_REQUEST_DATALINK_STATUS = b'\x43'
-CMD_ID_REQUEST_IMG_STATUS = b'\x44'
-CMD_ID_REQUEST_FW_VERSION = b'\x47'
-CMD_ID_REQUEST_ALL_CHANNEL_MAP = b'\x48'
-CMD_ID_REQUEST_CHANNEL_MAP = b'\x49'
+# Size of header packet and crc in byte
+STX_SIZE     = 2
+CTRL_SIZE    = 1
+DATALEN_SIZE = 2
+SEQ_SIZE     = 2
+CMD_ID_SIZE  = 1
+CRC_SIZE     = 2
+HEADER_SIZE  = STX_SIZE + CTRL_SIZE + DATALEN_SIZE + SEQ_SIZE + CMD_ID_SIZE + CRC_SIZE
+DATA_SIZE    = 32
+
+# Index in bytearray
+STX_IDX     = 0
+CTRL_IDX    = 2
+DATALEN_IDX = 3
+SEQ_IDX     = 5
+CMD_ID_IDX  = 7
+DATA_IDX    = 8
+
+# Command-id
+# Todo: Handle all cmd
+CMD_ID_REQUEST_SYSTEM_SETTING      = b'\x16'
+CMD_ID_REQUEST_HW_ID               = b'\x40'
+CMD_ID_REQUEST_CHANNEL_DATA        = b'\x42'
+CMD_ID_REQUEST_DATALINK_STATUS     = b'\x43'
+CMD_ID_REQUEST_IMG_STATUS          = b'\x44'
+CMD_ID_REQUEST_FW_VERSION          = b'\x47'
+CMD_ID_REQUEST_ALL_CHANNEL_MAP     = b'\x48'
+CMD_ID_REQUEST_CHANNEL_MAP         = b'\x49'
 CMD_ID_REQUEST_ALL_CHANNEL_REVERSE = b'\x4B'
-CMD_ID_REQUEST_CHANNEL_REVERSE = b'\x4C'
-
-CMD_ID_SEND_CHANNEL_MAP_TO_GROUND = b'\x4A'
-CMD_ID_SEND_SYSTEM_SETTING_TO_GROUND = b'\x17'
+CMD_ID_REQUEST_CHANNEL_REVERSE     = b'\x4C'
+CMD_ID_SEND_CHANNEL_MAP_TO_GROUND     = b'\x4A'
+CMD_ID_SEND_SYSTEM_SETTING_TO_GROUND  = b'\x17'
 CMD_ID_SEND_CHANNEL_REVERSE_TO_GROUND = b'\x4D'
 
 # frequency in Hz -> map option number
@@ -83,22 +103,19 @@ def crc16_ccitt(data: bytes, init_val=0):
 class SiyiRCModule(mp_module.MPModule):
     def __init__(self, mpstate):
         super(SiyiRCModule, self).__init__(mpstate, "siyi_rc", "SIYI RC from SDK over serial")
-        self.add_command('siyiserial', self.cmd_serial, 'SIYI remote serial control')
-        self.add_command('siyirc', self.cmd_rc_stream, 'SIYI remote rc streaming')
+        self.add_command('siyirc', self.cmd_siyirc_stream, 'SIYI remote rc streaming')
 
-        self.serial_settings = mp_settings.MPSettings(
+        self.siyirc_settings = mp_settings.MPSettings(
             [ ('port', str, '/dev/ttyACM0'),
               ('baudrate', int, 57600),
               ('timeout', int, 500),
-              ('verbose', bool, False)]
+              ('frequency', int, 4),
+              ('verbose', bool, True)]
             )
-        self.add_completion_function('(SERIALSETTING)', self.serial_settings.completion)
-        self.connected = False
+        self.add_completion_function('(SERIALSETTING)', self.siyirc_settings.completion)
 
         self.ser = None
-        self._running = True
-        self._rx_thread = threading.Thread(target=self.reader, daemon=True)
-        self._rx_thread.start()
+        self.rc_read_period = mavutil.periodic_event(10)
 
     # --------------------- I/O helpers --------------------------------
     def send_request(self, pkt_type, payload=b''):
@@ -112,6 +129,7 @@ class SiyiRCModule(mp_module.MPModule):
         frame.extend(crc16_ccitt(frame).to_bytes(2, 'little'))
         self.ser.write(frame)
 
+    # ------------------------------------------------------------------
     def request_rc_stream(self, rate='4'):
         options = OUTPUT_FREQUENCY.get(rate)
         if options is not None:
@@ -121,29 +139,63 @@ class SiyiRCModule(mp_module.MPModule):
         return False
 
     # ------------------------------------------------------------------
+    def parse_packet(self, pkt: bytes):
+        if len(pkt) < 11:
+            return None, "too short"
+        if pkt[STX_IDX:STX_SIZE] != STX:
+            print(pkt[STX_IDX:STX_SIZE])
+            return None, "bad STX"
+
+        ctrl      = pkt[CTRL_IDX]
+        data_len  = pkt[DATALEN_IDX] | (pkt[DATALEN_IDX+1] << 8)
+        seq       = pkt[SEQ_IDX] | (pkt[SEQ_IDX+1] << 8)
+        cmd_id    = pkt[CMD_ID_IDX]
+        total_len = HEADER_SIZE + data_len
+
+        if len(pkt) < total_len:
+            return None, "incomplete"
+
+        data     = pkt[DATA_IDX:DATA_IDX + data_len]
+        crc_recv = struct.unpack("<H", pkt[DATA_IDX+data_len:total_len])[0]
+
+        crc_calc = crc16_ccitt(pkt[:total_len-CRC_SIZE])
+        if crc_calc != crc_recv:
+            return None, f"CRC mismatch (calc=0x{crc_calc:04X}, recv=0x{crc_recv:04X})"
+
+        result = {
+            "STX"     : f"0x{STX.hex()}",
+            "CTRL_raw": ctrl,
+            "need_ack": ctrl == CTRL_NEED_ACK[0],
+            "ack_pack": ctrl == CTRL_ACK_PACK[0],
+            "Data_len": data_len,
+            "SEQ"     : seq,
+            "CMD_ID"  : cmd_id,
+            "CRC16"   : f"0x{crc_recv:04X}",
+        }
+
+        if data_len == DATA_SIZE:
+            channels = struct.unpack("<16h", data)
+            for i, v in enumerate(channels, 1):
+                result[f"CH{i}"] = v
+        else:
+            result["DATA(hex)"] = data.hex(" ").upper()
+
+        return result, None
+
+    # ------------------------------------------------------------------
     def reader(self):
         """Background thread: read & parse SIYI packets"""
-        if not self.ser:
-            # todo:
-            return
-        while self._running:
-            try:
-                stx = self.ser.read(2)
-                if stx != STX:
-                    continue
-                length_b = self.ser.read(1)
-                ptype_b  = self.ser.read(1)
-                if not length_b or not ptype_b:
-                    continue
-
-                plen = length_b[0]
-                ptype = ptype_b[0]
-                payload = self.ser.read(plen)
-                crc = self.ser.read(1)
-                # todo: parse all data
-                print(payload)
-            except Exception as e:
-                self.console.error(f"siyi_rc read error: {e}")
+        try:
+            data = self.ser.read(128)
+            index = data.find(STX)
+            parsed,err = self.parse_packet(pkt=data[index:])
+            if self.siyirc_settings.verbose:
+                if err:
+                    print(f"Error: {err}")
+                else:
+                    print(f"Parsed packet: {parsed}")
+        except Exception as e:
+            self.console.error(f"siyi_rc read error: {e}")
 
     # ------------------------------------------------------------------
     def serial_close(self):
@@ -158,9 +210,9 @@ class SiyiRCModule(mp_module.MPModule):
     def serial_connect(self):
         try:
             self.ser = serial.Serial(
-                port=self.serial_settings.port,
-                baudrate=self.serial_settings.baudrate,
-                timeout=self.serial_settings.timeout,
+                port=self.siyirc_settings.port,
+                baudrate=self.siyirc_settings.baudrate,
+                timeout=self.siyirc_settings.timeout,
             )
         except Exception as e:
             print(f"An unexpected error occurred: {e}")
@@ -175,43 +227,32 @@ class SiyiRCModule(mp_module.MPModule):
         else:
             print("The serial port object could not be created.")
 
-    def cmd_serial(self, args):
-        '''serial control commands'''
-        usage = "Usage: serial <status|set|connect|close|>"
-        if len(args) < 1:
-            print(usage)
-            return
-        if args[0] == "status":
-            self.serial_status()
-        elif args[0] == "set":
-            self.serial_settings.command(args[1:])
-        elif args[0] == "close":
-            self.serial_close()
-        elif args[0] == "connect":
-            self.serial_connect()
-        else:
-            print(usage)
-
-    def cmd_rc_stream(self, args):
+    # ------------------------------------------------------------------
+    def cmd_siyirc_stream(self, args):
         '''rc streaming commands'''
-        usage = "Usage: siyirc <start|stop>"
+        usage = "Usage: siyirc <start|stop|set|status>"
         if len(args) < 1:
             print(usage)
-            return
-        elif not self.ser:
-            print("Serial port is not opened")
             return
 
         if args[0] == "start":
-            if len(args) > 1:
-                if not self.request_rc_stream(rate=args[1]):
-                    print("Usage: siyi_rc start <FREQUENCY> \n Available FREQUENCY: ", end=' ')
-                    print(*list(OUTPUT_FREQUENCY.keys()), sep=", ", end=" Hz.\n")
-                    return
+            self.serial_connect()
+            self.request_rc_stream(rate=self.siyirc_settings.frequency)
         elif args[0] == "stop":
             self.request_rc_stream(rate_options=0)
+            self.serial_close()
+        elif args[0] == "set":
+            self.siyirc_settings.command(args[1:])
+        elif args[0] == "status":
+            self.serial_status()
         else:
             print(usage)
+
+    # ------------------------------------------------------------------
+    def idle_task(self):
+        if self.rc_read_period.trigger():
+            if self.ser:
+                self.reader()
 
 def init(mpstate):
     return SiyiRCModule(mpstate)
