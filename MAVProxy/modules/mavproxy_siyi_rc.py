@@ -5,6 +5,13 @@ from MAVProxy.modules.lib import mp_settings
 from pymavlink import mavutil
 import serial, struct, threading, time
 
+# For print()
+RED    = '\033[31m'
+GREEN  = '\033[32m'
+YELLOW = '\033[33m'
+BLUE   = '\033[34m'
+RESET  = '\033[0m'
+
 # Mark byte for parsing
 STX           = b'\x55\x66'
 CTRL_NEED_ACK = b'\x00'
@@ -110,7 +117,7 @@ class SiyiRCModule(mp_module.MPModule):
               ('baudrate', int, 57600),
               ('timeout', int, 500),
               ('frequency', int, 4),
-              ('verbose', bool, True)]
+              ('verbose', int, 2)]
             )
         self.add_completion_function('(SERIALSETTING)', self.siyirc_settings.completion)
 
@@ -140,11 +147,20 @@ class SiyiRCModule(mp_module.MPModule):
 
     # ------------------------------------------------------------------
     def parse_packet(self, pkt: bytes):
-        if len(pkt) < 11:
-            return None, "too short"
+        if len(pkt) < DATA_SIZE:
+            return None, None, "too short"
         if pkt[STX_IDX:STX_SIZE] != STX:
             print(pkt[STX_IDX:STX_SIZE])
-            return None, "bad STX"
+            return None, None, "bad STX"
+
+        # Print raw packet if needed
+        if self.siyirc_settings.verbose > 1:
+            print("Raw Packet:")
+            for i, b in enumerate(pkt):
+                print(RED+f"{b:02X} "+RESET, end="")
+                if (i + 1) % 8 == 0:
+                    print()
+            print("\n")
 
         ctrl      = pkt[CTRL_IDX]
         data_len  = pkt[DATALEN_IDX] | (pkt[DATALEN_IDX+1] << 8)
@@ -153,34 +169,33 @@ class SiyiRCModule(mp_module.MPModule):
         total_len = HEADER_SIZE + data_len
 
         if len(pkt) < total_len:
-            return None, "incomplete"
+            return None, None, "incomplete"
 
         data     = pkt[DATA_IDX:DATA_IDX + data_len]
         crc_recv = struct.unpack("<H", pkt[DATA_IDX+data_len:total_len])[0]
 
         crc_calc = crc16_ccitt(pkt[:total_len-CRC_SIZE])
         if crc_calc != crc_recv:
-            return None, f"CRC mismatch (calc=0x{crc_calc:04X}, recv=0x{crc_recv:04X})"
+            return None, None, f"CRC mismatch (calc=0x{crc_calc:04X}, recv=0x{crc_recv:04X})"
 
-        result = {
-            "STX"     : f"0x{STX.hex()}",
-            "CTRL_raw": ctrl,
-            "need_ack": ctrl == CTRL_NEED_ACK[0],
-            "ack_pack": ctrl == CTRL_ACK_PACK[0],
-            "Data_len": data_len,
-            "SEQ"     : seq,
-            "CMD_ID"  : cmd_id,
-            "CRC16"   : f"0x{crc_recv:04X}",
+        packet_info = {
+          "STX"     : f"0x{STX.hex()}",
+          "CTRL_raw": ctrl,
+          "need_ack": ctrl == CTRL_NEED_ACK[0],
+          "ack_pack": ctrl == CTRL_ACK_PACK[0],
+          "Data_len": data_len,
+          "SEQ"     : seq,
+          "CMD_ID"  : cmd_id,
+          "CRC16"   : f"0x{crc_recv:04X}",
         }
 
+        result_data = {}
         if data_len == DATA_SIZE:
             channels = struct.unpack("<16h", data)
             for i, v in enumerate(channels, 1):
-                result[f"CH{i}"] = v
-        else:
-            result["DATA(hex)"] = data.hex(" ").upper()
+                result_data[i] = v
 
-        return result, None
+        return packet_info, result_data, None
 
     # ------------------------------------------------------------------
     def reader(self):
@@ -188,12 +203,24 @@ class SiyiRCModule(mp_module.MPModule):
         try:
             data = self.ser.read(128)
             index = data.find(STX)
-            parsed,err = self.parse_packet(pkt=data[index:])
+            info, parsed_data, err = self.parse_packet(pkt=data[index:])
             if self.siyirc_settings.verbose:
                 if err:
-                    print(f"Error: {err}")
+                    print(RED+f"Error: {err}"+RESET)
                 else:
-                    print(f"Parsed packet: {parsed}")
+                    # Print RC channels compactly
+                    print("RC Channels:")
+                    for ch, val in parsed_data.items():
+                        print(BLUE+f"CH{ch:02}: "+RESET+GREEN+f"{val:4}"+RESET, end="   ")
+                        if ch % 4 == 0:  # 4 per row
+                            print()
+                    # Print info packet in one line
+                    print("Info Packet:")
+                    for k, v in info.items():
+                        print(BLUE+f"{k}: "+RESET+YELLOW+f"{v}"+RESET, end="   ")
+                    print("\n")
+
+            return parsed_data
         except Exception as e:
             self.console.error(f"siyi_rc read error: {e}")
 
@@ -252,7 +279,9 @@ class SiyiRCModule(mp_module.MPModule):
     def idle_task(self):
         if self.rc_read_period.trigger():
             if self.ser:
-                self.reader()
+                rc_in_value = self.reader()
+                # if self.module('rc') is not None:
+                    # self.module('rc').set_override_chan()
 
 def init(mpstate):
     return SiyiRCModule(mpstate)
