@@ -124,7 +124,7 @@ class SiyiRCModule(mp_module.MPModule):
               ('frequency', int, 100),
               ('verbose', int, 0)]
             )
-        self.add_completion_function('(SERIALSETTING)', self.siyirc_settings.completion)
+        self.add_completion_function('(SIYIRCSETTING)', self.siyirc_settings.completion)
 
         self.ser = None
         self.rc_override_value = {i: RC_MIN for i in range(RC_TOTAL_CH)}
