@@ -5,6 +5,11 @@ from MAVProxy.modules.lib import mp_settings
 from pymavlink import mavutil
 import serial, struct, threading, time
 
+# RC channel, min pwm, and max pwm
+RC_TOTAL_CH = 16
+RC_MIN = 1000
+RC_MAX = 2000
+
 # For print()
 RED    = '\033[31m'
 GREEN  = '\033[32m'
@@ -114,15 +119,18 @@ class SiyiRCModule(mp_module.MPModule):
 
         self.siyirc_settings = mp_settings.MPSettings(
             [ ('port', str, '/dev/ttyACM0'),
-              ('baudrate', int, 57600),
-              ('timeout', int, 500),
-              ('frequency', int, 4),
-              ('verbose', int, 2)]
+              ('baudrate', int, 115200),
+              ('timeout', int, 5),
+              ('frequency', int, 100),
+              ('verbose', int, 0)]
             )
         self.add_completion_function('(SERIALSETTING)', self.siyirc_settings.completion)
 
         self.ser = None
-        self.rc_read_period = mavutil.periodic_event(10)
+        self.rc_override_value = {i: RC_MIN for i in range(RC_TOTAL_CH)}
+        self.rc_read_period = mavutil.periodic_event(20)
+        self.thread = threading.Thread(target=self.reader)
+        self.thread.start()
 
     # --------------------- I/O helpers --------------------------------
     def send_request(self, pkt_type, payload=b''):
@@ -200,29 +208,36 @@ class SiyiRCModule(mp_module.MPModule):
     # ------------------------------------------------------------------
     def reader(self):
         """Background thread: read & parse SIYI packets"""
-        try:
-            data = self.ser.read(128)
-            index = data.find(STX)
-            info, parsed_data, err = self.parse_packet(pkt=data[index:])
-            if self.siyirc_settings.verbose:
-                if err:
-                    print(RED+f"Error: {err}"+RESET)
-                else:
-                    # Print RC channels compactly
-                    print("RC Channels:")
-                    for ch, val in parsed_data.items():
-                        print(BLUE+f"CH{ch:02}: "+RESET+GREEN+f"{val:4}"+RESET, end="   ")
-                        if ch % 4 == 0:  # 4 per row
-                            print()
-                    # Print info packet in one line
-                    print("Info Packet:")
-                    for k, v in info.items():
-                        print(BLUE+f"{k}: "+RESET+YELLOW+f"{v}"+RESET, end="   ")
-                    print("\n")
+        while True:
+            try:
+                if not self.ser:
+                    continue
+                data = self.ser.read(128)
+                index = data.find(STX)
+                info, parsed_data, err = self.parse_packet(pkt=data[index:])
+                # Update RCin value
+                if parsed_data:
+                    self.rc_override_value = parsed_data
+                # For debugging
+                if self.siyirc_settings.verbose:
+                    if err:
+                        print(RED+f"Error: {err}"+RESET)
+                    else:
+                        # Print RC channels compactly
+                        print("RC Channels:")
+                        for ch, val in parsed_data.items():
+                            print(BLUE+f"CH{ch:02}: "+RESET+GREEN+f"{val:4}"+RESET, end="   ")
+                            if ch % 4 == 0:  # 4 per row
+                                print()
+                        # Print info packet in one line
+                        print("Info Packet:")
+                        for k, v in info.items():
+                            print(BLUE+f"{k}: "+RESET+YELLOW+f"{v}"+RESET, end="   ")
+                        print("\n")
 
-            return parsed_data
-        except Exception as e:
-            self.console.error(f"siyi_rc read error: {e}")
+            except Exception as e:
+                self.console.error(f"siyi_rc read error: {e}")
+                continue
 
     # ------------------------------------------------------------------
     def serial_close(self):
@@ -266,11 +281,12 @@ class SiyiRCModule(mp_module.MPModule):
             self.serial_connect()
             self.request_rc_stream(rate=self.siyirc_settings.frequency)
         elif args[0] == "stop":
-            self.request_rc_stream(rate_options=0)
+            self.request_rc_stream(rate=0)
             self.serial_close()
         elif args[0] == "set":
             self.siyirc_settings.command(args[1:])
         elif args[0] == "status":
+            # todo: add rc-stream status
             self.serial_status()
         else:
             print(usage)
@@ -279,9 +295,8 @@ class SiyiRCModule(mp_module.MPModule):
     def idle_task(self):
         if self.rc_read_period.trigger():
             if self.ser:
-                rc_in_value = self.reader()
-                # if self.module('rc') is not None:
-                    # self.module('rc').set_override_chan()
+                if self.module('rc') is not None:
+                    [self.module('rc').set_override_chan(ch-1, v) for ch, v in self.rc_override_value.items()]
 
 def init(mpstate):
     return SiyiRCModule(mpstate)
