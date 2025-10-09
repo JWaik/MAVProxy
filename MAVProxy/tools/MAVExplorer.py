@@ -1423,7 +1423,7 @@ def cmd_gpsdist(args):
     """
     results, total_distance, _ = calc_gps_dist()
 
-    for mode, d in results:
+    for mode, d, _ in results:
         print(f"{mode:8s}: {d/1000:.2f} km ({d:.1f} m)")
     print(f"Total distance: {total_distance/1000:.2f} km ({total_distance:.1f} m)")
 
@@ -1481,8 +1481,39 @@ def calc_gps_dist():
                 total_dist += step
             last_lat, last_lon = lat, lon
         total_time += end-start
-        results.append((mode, dist))
+        results.append((mode, dist, end-start))
     return results, total_dist, total_time
+
+
+def read_battery_information():
+    recv = mestate.mlog.recv_match
+    total_current = 0.0
+    total_energy = 0.0
+    while True:
+        msg = recv(type=['BAT'], blocking=False)
+        if msg is None:
+            break
+        total_current = msg.CurrTot
+        total_energy = msg.EnrgTot
+    mestate.mlog.rewind()
+    return total_current, total_energy
+
+def cmd_flightinfo(args):
+    """
+    Show flight information to console.
+    """
+    # GPS traveled distance
+    results, total_distance, total_time = calc_gps_dist()
+    total_current, _ = read_battery_information()
+
+    mestate.console.writeln("\n #### Flight information ####")
+    mestate.console.writeln("## Traveled distance ##", fg='red')
+    for mode, distance, duration in results:
+        mestate.console.writeln(f"{mode:2s} {"("+str(int(duration))+" s)":2s}:   {distance/1000:.2f} km ({distance:.1f} m)",fg='blue')
+    mestate.console.writeln("## Summary ##", fg='red')
+    mestate.console.writeln(f"{"Total distance":15s}     : {total_distance/1000:.2f} km ({total_distance:.1f} m)",fg='blue')
+    mestate.console.writeln(f"{"Total time":15s}         : {int(total_time)} s ({int(total_time/60)} min.)",fg='blue')
+    mestate.console.writeln(f"{"Battery consumption":25s}: {int(total_current)} mAh.",fg='blue')
 
 def print_caught_exception(e):
     if sys.version_info[0] >= 3:
@@ -1646,6 +1677,7 @@ command_map = {
     'mission'    : (cmd_mission,   'show mission'),
     'logmessage' : (cmd_logmessage, 'show log message information'),
     'gpsdist'    : (cmd_gpsdist,  'show total distance traveled based on GPS data'),
+    'flightinfo' : (cmd_flightinfo, 'show total distance traveled based on GPS data'),
     }
 
 def progress_bar(pct):
