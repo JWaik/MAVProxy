@@ -1421,7 +1421,7 @@ def cmd_gpsdist(args):
     """
     Show total distance traveled based on GPS data.
     """
-    results, total_distance = calc_gps_dist()
+    results, total_distance, _ = calc_gps_dist()
 
     for mode, d in results:
         print(f"{mode:8s}: {d/1000:.2f} km ({d:.1f} m)")
@@ -1468,6 +1468,7 @@ def calc_gps_dist():
     # distance per segment
     results = []
     total_dist = 0.0
+    total_time = 0.0
     for mode, start, end in segments:
         dist = 0.0
         last_lat = last_lon = None
@@ -1479,8 +1480,9 @@ def calc_gps_dist():
                 dist += step
                 total_dist += step
             last_lat, last_lon = lat, lon
+        total_time += end-start
         results.append((mode, dist))
-    return results, total_dist
+    return results, total_dist, total_time
 
 def print_caught_exception(e):
     if sys.version_info[0] >= 3:
