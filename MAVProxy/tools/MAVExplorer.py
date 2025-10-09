@@ -1420,6 +1420,16 @@ def loadfile(args):
 def cmd_gpsdist(args):
     """
     Show total distance traveled based on GPS data.
+    """
+    results, total_distance = calc_gps_dist()
+
+    for mode, d in results:
+        print(f"{mode:8s}: {d/1000:.2f} km ({d:.1f} m)")
+    print(f"Total distance: {total_distance/1000:.2f} km ({total_distance:.1f} m)")
+
+def calc_gps_dist():
+    """
+    Calculate total distance traveled based on GPS data.
     segments: list of (mode, start_time, end_time)
     returns: list of (mode, distance_m)
     """
@@ -1457,7 +1467,7 @@ def cmd_gpsdist(args):
 
     # distance per segment
     results = []
-    total = 0.0
+    total_dist = 0.0
     for mode, start, end in segments:
         dist = 0.0
         last_lat = last_lon = None
@@ -1467,15 +1477,10 @@ def cmd_gpsdist(args):
             if last_lat is not None:
                 step = haversine(last_lat, last_lon, lat, lon)
                 dist += step
-                total += step
+                total_dist += step
             last_lat, last_lon = lat, lon
         results.append((mode, dist))
-
-    for mode, d in results:
-        print(f"{mode:8s}: {d/1000:.2f} km ({d:.1f} m)")
-    print(f"Total distance: {total/1000:.2f} km ({total:.1f} m)")
-
-    return results
+    return results, total_dist
 
 def print_caught_exception(e):
     if sys.version_info[0] >= 3:
