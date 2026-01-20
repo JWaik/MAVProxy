@@ -125,10 +125,12 @@ class MEState(object):
             "set"       : ["(SETTING)"],
             "condition" : ["(VARIABLE)"],
             "graph"     : ['(VARIABLE) (VARIABLE) (VARIABLE) (VARIABLE) (VARIABLE) (VARIABLE) (VARIABLE) (VARIABLE) (VARIABLE) (VARIABLE) (VARIABLE) (VARIABLE)'],
+            "graphs"    : ['(PREDEFINED_GRAPH)'],
             "dump"      : ['(MESSAGETYPE)', '--verbose (MESSAGETYPE)'],
             "map"       : ['(VARIABLE) (VARIABLE) (VARIABLE) (VARIABLE) (VARIABLE)'],
             "param"     : ['download', 'check', 'help (PARAMETER)', 'save', 'savechanged', 'diff', 'show', 'check'],
             "logmessage": ['download', 'help (MESSAGETYPE)'],
+            "locationAnalysis"  : [],
             }
         self.aliases = {}
         self.graphs = []
@@ -252,7 +254,8 @@ def setup_menus():
     TopMenu.add(MPMenuSubMenu('Tools',
                               items=[MPMenuItem('MagFit', 'MagFit', '# magfit'),
                                      MPMenuItem('Stats', 'Stats', '# stats'),
-                                     MPMenuItem('FFT', 'FFT', '# fft')]))
+                                     MPMenuItem('FFT', 'FFT', '# fft'),
+                                     MPMenuItem('Location Analysis', 'Location', '# locationAnalysis')]))
 
     mestate.console.set_menu(TopMenu, menu_callback)
 
@@ -371,6 +374,11 @@ def load_graphs():
                 mestate.graphs.extend(graphs)
                 mestate.console.writeln("Loaded %s" % f)
     mestate.graphs = sorted(mestate.graphs, key=lambda g: g.name)
+    # Update completions with actual graph names
+    if len(mestate.graphs) > 0:
+        # Some default graph names have spaces: replace with -
+        graph_names = [g.name.replace(' ', '-') for g in mestate.graphs]
+        mestate.completions["graphs"] = graph_names
 
 def flightmode_colours():
     '''return mapping of flight mode to colours'''
@@ -384,6 +392,125 @@ def flightmode_colours():
             if idx >= len(flightmode_colours):
                 idx = 0
     return mapping
+
+def cmd_location(args):
+    '''analyze GPS locations and identify nearest cities/countries'''
+    try:
+        from geopy.geocoders import Nominatim
+        from geopy.distance import geodesic
+        from geopy.exc import GeocoderTimedOut, GeocoderServiceError
+    except ImportError:
+        print("Error: geopy library not installed. Install with: pip install geopy")
+        return
+
+    # Initialize geocoder
+    geolocator = Nominatim(user_agent="MAVExplorer")
+
+    # Sample every 5km
+    sample_distance_km = 5.0
+
+    mestate.mlog.rewind()
+
+    # Track sampled positions
+    last_sampled_pos = None
+    sampled_positions = []
+    locations = set()  # Store display_name strings
+
+    print("Scanning log for GPS coordinates...")    # Read all GPS messages
+    msg_types = ['GPS', 'GPS_RAW_INT', 'GLOBAL_POSITION_INT']
+    while True:
+        msg = mestate.mlog.recv_match(type=msg_types, condition=mestate.settings.condition)
+        if msg is None:
+            break
+
+        msg_type = msg.get_type()
+        lat = None
+        lon = None
+
+        # Extract coordinates based on message type
+        if msg_type == 'GPS':
+            # Binary log format - uppercase Lat/Lng
+            if hasattr(msg, 'Lat') and hasattr(msg, 'Lng'):
+                lat = msg.Lat
+                lon = msg.Lng
+        elif msg_type in ['GPS_RAW_INT', 'GLOBAL_POSITION_INT']:
+            # MAVLink format - degE7
+            if hasattr(msg, 'lat') and hasattr(msg, 'lon'):
+                lat = msg.lat * 1.0e-7
+                lon = msg.lon * 1.0e-7
+
+        # Validate coordinates
+        if lat is None or lon is None:
+            continue
+        if lat == 0 and lon == 0:
+            continue
+
+        # Always sample first valid coordinate
+        if last_sampled_pos is None:
+            last_sampled_pos = (lat, lon, msg._timestamp)
+            sampled_positions.append((lat, lon, msg._timestamp))
+            continue
+
+        # Calculate distance from last sampled position
+        distance_km = geodesic(last_sampled_pos[:2], (lat, lon)).kilometers
+
+        # Sample if distance >= 5km
+        if distance_km >= sample_distance_km:
+            last_sampled_pos = (lat, lon, msg._timestamp)
+            sampled_positions.append((lat, lon, msg._timestamp))
+
+    mestate.mlog.rewind()
+
+    if len(sampled_positions) == 0:
+        print("No valid GPS coordinates found in log.")
+        return
+
+    print("Found %d GPS samples, performing reverse geocoding..." % len(sampled_positions))
+
+    # Geocode sampled positions
+    for idx, (lat, lon, timestamp) in enumerate(sampled_positions):
+        print("Geocoding sample %d/%d..." % (idx + 1, len(sampled_positions)))
+
+        try:
+            # Use 50km search radius to find nearest city
+            location = geolocator.reverse((lat, lon), timeout=10, language='en', addressdetails=True, zoom=8)
+
+            if location and location.raw:
+                # Use display_name from location.raw
+                display_name = location.raw.get('display_name', '')
+
+                if display_name:
+                    locations.add(display_name)
+
+                    # Show location for first and last samples
+                    if idx == 0:
+                        ts_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+                        print("  Start location: %s at %s" % (display_name, ts_str))
+                    elif idx == len(sampled_positions) - 1:
+                        ts_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+                        print("  End location: %s at %s" % (display_name, ts_str))
+
+            # Rate limiting: 1 second between requests
+            time.sleep(1)
+
+        except GeocoderTimedOut:
+            print("  Geocoding timeout for sample %d, skipping..." % (idx + 1))
+            continue
+        except GeocoderServiceError as e:
+            print("  Geocoding service error for sample %d: %s" % (idx + 1, str(e)))
+            continue
+        except Exception as e:
+            print("  Error geocoding sample %d: %s" % (idx + 1, str(e)))
+            continue
+
+    # Display summary
+    print("\n=== Location Summary ===")
+    if len(locations) > 0:
+        print("Locations visited:")
+        for location_name in sorted(locations):
+            print("  %s" % location_name)
+    else:
+        print("No location information could be retrieved.")
 
 def check_vehicle_type():
     '''check vehicle_type option'''
@@ -430,6 +557,40 @@ def cmd_graph(args):
     else:
         expression = ' '.join(args)
         mestate.last_graph = GraphDefinition(mestate.settings.title, expression, '', [expression], None)
+    if mestate.settings.debug > 0:
+        print("Adding graph: %s" % mestate.last_graph.expression)
+    grui.append(Graph_UI(mestate))
+    grui[-1].display_graph(mestate.last_graph, flightmode_colours())
+    global xlimits
+    if xlimits.last_xlim is not None and mestate.settings.sync_xzoom:
+        #print("initial: ", xlimits.last_xlim)
+        grui[-1].set_xlim(xlimits.last_xlim)
+
+def cmd_graphs(args):
+    '''graphs command'''
+    usage = "usage: graphs <PREDEFINED_GRAPH_NAME>"
+    if len(args) < 1:
+        print(usage)
+        return
+    check_vehicle_type()
+    graph_name = ' '.join(args)
+
+    # Normalize search term and graph names by replacing spaces with dashes
+    normalized_search = graph_name.replace(' ', '-').upper()
+
+    # Find matching predefined graph
+    matching_graphs = [g for g in mestate.graphs if normalized_search in g.name.replace(' ', '-').upper()]
+    if not matching_graphs:
+        print("No predefined graph found matching: %s" % graph_name)
+        return
+
+    # Display the first matching graph
+    g = matching_graphs[0]
+    mestate.console.write("Added predefined graph: %s\n" % g.name)
+    if g.description:
+        mestate.console.write("%s\n" % g.description, fg='blue')
+    mestate.rl.add_history("graphs %s" % g.name)
+    mestate.last_graph = g
     if mestate.settings.debug > 0:
         print("Adding graph: %s" % mestate.last_graph.expression)
     grui.append(Graph_UI(mestate))
@@ -936,18 +1097,25 @@ def cmd_messages(args):
             mstr = m.text
 
         # special handling for statustext:
-        if hasattr(m, 'id') and hasattr(m, 'chunk_seq') and m.chunk_seq != 0:  # assume STATUSTEXT
-            if m.id != statustext_current_id:
+        chunking_id = getattr(m, "id", getattr(m, "ID", None))
+        chunking_seq = getattr(m, "chunk_seq", getattr(m, "Seq", None))
+
+        if chunking_id is not None and chunking_seq is not None and chunking_id != 0:
+            if chunking_id != statustext_current_id:
                 if statustext_accumulation is not None:
                     print_if_match(statustext_timestring, statustext_accumulation)
                 statustext_accumulation = ""
-                statustext_current_id = m.id
+                statustext_current_id = chunking_id
                 statustext_next_seq = 0
                 statustext_timestring = timestring(m)
-            if m.chunk_seq != statustext_next_seq:
+            if chunking_seq != statustext_next_seq:
                 statustext_accumulation += "..."
-            statustext_next_seq = m.chunk_seq + 1
-            statustext_accumulation += m.text
+            statustext_next_seq = chunking_seq + 1
+            t_str = getattr(m, "text", None)
+            if t_str is None:
+                t_str = getattr(m, 'Message')
+            statustext_accumulation += t_str
+
             continue
 
         print_if_match(timestring(m), mstr)
@@ -1561,6 +1729,7 @@ def main_loop():
 
 command_map = {
     'graph'      : (cmd_graph,     'display a graph'),
+    'graphs'     : (cmd_graphs,    'display a predefined graph'),
     'set'        : (cmd_set,       'control settings'),
     'reload'     : (cmd_reload,    'reload graphs'),
     'save'       : (cmd_save,      'save a graph'),
@@ -1578,6 +1747,7 @@ command_map = {
     'file'       : (cmd_file,      'show files'),
     'mission'    : (cmd_mission,   'show mission'),
     'logmessage' : (cmd_logmessage, 'show log message information'),
+    'locationAnalysis'   : (cmd_location,  'Output a descriptive list of locations from the log' ),
     }
 
 def progress_bar(pct):
